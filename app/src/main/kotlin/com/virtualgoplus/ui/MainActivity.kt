@@ -32,6 +32,7 @@ import com.virtualgoplus.engine.AutoCatcherEngine
 import com.virtualgoplus.gatt.GattServerManager
 import com.virtualgoplus.service.GoPlusBleService
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.*
 
