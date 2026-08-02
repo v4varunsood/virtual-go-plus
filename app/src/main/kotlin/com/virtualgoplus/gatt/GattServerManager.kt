@@ -1,6 +1,7 @@
 package com.virtualgoplus.gatt
 
 import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothGattDescriptor
@@ -35,7 +36,7 @@ class GattServerManager(
     private var bluetoothGattServer: BluetoothGattServer? = null
     var autoCatcherEngine: AutoCatcherEngine? = null
     private var stateCharacteristic: BluetoothGattCharacteristic? = null
-    private var connectedDeviceAddress: String? = null
+    private var connectedDevice: BluetoothDevice? = null
 
     fun initialize() {
         val bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
@@ -47,7 +48,7 @@ class GattServerManager(
             }
 
         // Add SFIDA service
-        val sfidaService = android.bluetooth.BluetoothGattService(
+        val sfidaService = BluetoothGattService(
             SFIDA_SERVICE_UUID,
             BluetoothGatt.SERVICE_TYPE_PRIMARY
         )
@@ -70,7 +71,7 @@ class GattServerManager(
         bluetoothGattServer?.addService(sfidaService)
 
         // Also add GO Plus service
-        val goPlusService = android.bluetooth.BluetoothGattService(
+        val goPlusService = BluetoothGattService(
             GOPLUS_SERVICE_UUID,
             BluetoothGatt.SERVICE_TYPE_PRIMARY
         )
@@ -87,9 +88,9 @@ class GattServerManager(
     fun sendStateNotification(state: Byte) {
         stateCharacteristic?.let { char ->
             char.value = byteArrayOf(state)
-            connectedDeviceAddress?.let { address ->
+            connectedDevice?.let { device ->
                 bluetoothGattServer?.notifyCharacteristicChanged(
-                    address,
+                    device,
                     char,
                     false
                 )
@@ -98,20 +99,20 @@ class GattServerManager(
     }
 
     private val gattServerCallback = object : BluetoothGattServerCallback() {
-        override fun onConnectionStateChange(device: android.bluetooth.BluetoothDevice?, status: Int, newState: Int) {
+        override fun onConnectionStateChange(device: BluetoothDevice?, status: Int, newState: Int) {
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> {
-                    connectedDeviceAddress = device?.address
+                    connectedDevice = device
                     Log.i(TAG, "Device connected: ${device?.address}")
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
                     Log.i(TAG, "Device disconnected")
-                    connectedDeviceAddress = null
+                    connectedDevice = null
                 }
             }
         }
 
-        override fun onServiceAdded(status: Int, service: android.bluetooth.BluetoothGattService?) {
+        override fun onServiceAdded(status: Int, service: BluetoothGattService?) {
             if (status == BluetoothGatt.GATT_SUCCESS) {
                 Log.i(TAG, "GATT service added: ${service?.uuid}")
             } else {
@@ -120,11 +121,11 @@ class GattServerManager(
         }
 
         override fun onCharacteristicReadRequest(
-            device: android.bluetooth.BluetoothDevice?,
+            device: BluetoothDevice?,
             requestId: Int,
             offset: Int,
-            characteristic: android.bluetooth.BluetoothGattCharacteristic?
-        ): Boolean {
+            characteristic: BluetoothGattCharacteristic?
+        ) {
             Log.i(TAG, "Characteristic read request: ${characteristic?.uuid}")
             characteristic?.let { char ->
                 bluetoothGattServer?.sendResponse(
@@ -135,18 +136,17 @@ class GattServerManager(
                     byteArrayOf(0x02) // default connected state
                 )
             }
-            return true
         }
 
         override fun onCharacteristicWriteRequest(
-            device: android.bluetooth.BluetoothDevice?,
+            device: BluetoothDevice?,
             requestId: Int,
-            characteristic: android.bluetooth.BluetoothGattCharacteristic?,
-            prepareWrite: Boolean,
+            characteristic: BluetoothGattCharacteristic?,
+            preparedWrite: Boolean,
             responseNeeded: Boolean,
             offset: Int,
             value: ByteArray?
-        ): Boolean {
+        ) {
             val charUuid = characteristic?.uuid
             val data = value?.toList() ?: emptyList()
             Log.i(TAG, "Characteristic write request — UUID: $charUuid, data: $data")
@@ -163,11 +163,10 @@ class GattServerManager(
                     null
                 )
             }
-            return true
         }
 
         override fun onDescriptorWriteRequest(
-            device: android.bluetooth.BluetoothDevice?,
+            device: BluetoothDevice?,
             requestId: Int,
             descriptor: BluetoothGattDescriptor?,
             preparedWrite: Boolean,
@@ -188,7 +187,7 @@ class GattServerManager(
         }
 
         override fun onExecuteWriteRequest(
-            device: android.bluetooth.BluetoothDevice?,
+            device: BluetoothDevice?,
             requestId: Int,
             executeWrite: Boolean
         ) {
