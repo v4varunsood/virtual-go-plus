@@ -72,9 +72,6 @@ class MainActivity : ComponentActivity() {
             kotlinx.coroutines.MainScope().launch {
                 while (isBound) {
                     connectionState = svc.connectionState
-                    svc.getGattServerManager()?.autoCatcherEngine?.let { engine ->
-                        eventLog = engine.eventLog
-                    }
                     delay(500)
                 }
             }

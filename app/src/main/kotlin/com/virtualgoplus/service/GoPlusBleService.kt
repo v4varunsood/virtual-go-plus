@@ -242,8 +242,13 @@ class GoPlusBleService : Service() {
             Log.e(TAG, "Cannot set device name: ${e.message}")
         }
 
-        gattServerManager = GattServerManager(this, bluetoothAdapter)
-        gattServerManager?.initialize()
+        gattServerManager = GattServerManager(
+            context = this,
+            onDeviceConnected = { updateNotification("Connected!") },
+            onDeviceDisconnected = { updateNotification("Disconnected") },
+            onServiceReady = { startAdvertising() }
+        )
+        gattServerManager?.start()
     }
 
     @Suppress("DEPRECATION")

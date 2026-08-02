@@ -9,7 +9,7 @@ import android.bluetooth.BluetoothGattServerCallback
 import android.bluetooth.BluetoothGattService
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothAdapter
-import android.bluetooth.BluetoothLeAdvertiser
+import android.bluetooth.BluetoothProfile
 import android.content.Context
 import android.os.ParcelUuid
 import android.util.Log
@@ -117,7 +117,7 @@ class GattServerManager(
                         // Return button press state (0x01 = pressed)
                         val value = byteArrayOf(BUTTON_RELEASE_BYTE)
                         gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
-                        Log.i(TAG, "Read STATE_CHAR -> ${value[0].toHex()}")
+                        Log.i(TAG, "Read STATE_CHAR -> %02X".format(value[0]))
                     }
                     DEVICE_INFO_CHAR_UUID -> {
                         // Return "Virtual GO Plus" device info
@@ -235,13 +235,6 @@ class GattServerManager(
 
             override fun onNotificationSent(device: BluetoothDevice?, status: Int) {
                 Log.i(TAG, "Notification sent status=$status")
-            }
-
-            override fun onExecuteWriteRequest(device: BluetoothDevice?, requestId: Int, executeWrite: Boolean) {
-                Log.i(TAG, "Execute write requestId=$requestId execute=$executeWrite")
-                if (executeWrite) {
-                    gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
-                }
             }
         }
 
@@ -364,5 +357,4 @@ class GattServerManager(
 
     fun getServer(): BluetoothGattServer? = gattServer
     fun getConnectedDevice(): BluetoothDevice? = connectedDevice
-}
 }
