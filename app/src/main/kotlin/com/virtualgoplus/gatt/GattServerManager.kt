@@ -248,6 +248,87 @@ class GattServerManager(
         }
     }
 
+    private fun createServices(): List<BluetoothGattService> {
+        val services = mutableListOf<BluetoothGattService>()
+
+        // Primary GO Plus Service
+        val goPlusService = BluetoothGattService(SERVICE_UUID, BluetoothGattService.SERVICE_TYPE_PRIMARY)
+
+        // State characteristic - READ + NOTIFY
+        val stateChar = BluetoothGattCharacteristic(
+            STATE_CHAR_UUID,
+            BluetoothGattCharacteristic.PROPERTY_READ or BluetoothGattCharacteristic.PROPERTY_NOTIFY,
+            BluetoothGattCharacteristic.PERMISSION_READ
+        )
+        val stateCccd = BluetoothGattDescriptor(
+            CLIENT_CONFIG_DESCRIPTOR_UUID,
+            BluetoothGattDescriptor.PERMISSION_READ or BluetoothGattDescriptor.PERMISSION_WRITE
+        )
+        stateChar.addDescriptor(stateCccd)
+        goPlusService.addCharacteristic(stateChar)
+
+        // Config characteristic - WRITE (from smali: properties 0x08 | 0x04 = 0x0C)
+        val configChar = BluetoothGattCharacteristic(
+            CONFIG_CHAR_UUID,
+            BluetoothGattCharacteristic.PROPERTY_READ or BluetoothGattCharacteristic.PROPERTY_WRITE,
+            BluetoothGattCharacteristic.PERMISSION_READ or BluetoothGattCharacteristic.PERMISSION_WRITE
+        )
+        goPlusService.addCharacteristic(configChar)
+
+        // Config2 characteristic - WRITE_NO_RESPONSE (from smali: properties 0x08 | 0x04 | 0x02 = 0x0E)
+        val config2Char = BluetoothGattCharacteristic(
+            CONFIG2_CHAR_UUID,
+            BluetoothGattCharacteristic.PROPERTY_READ or BluetoothGattCharacteristic.PROPERTY_WRITE or BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE,
+            BluetoothGattCharacteristic.PERMISSION_READ or BluetoothGattCharacteristic.PERMISSION_WRITE
+        )
+        goPlusService.addCharacteristic(config2Char)
+
+        // Device Info characteristic - READ
+        val deviceInfoChar = BluetoothGattCharacteristic(
+            DEVICE_INFO_CHAR_UUID,
+            BluetoothGattCharacteristic.PROPERTY_READ,
+            BluetoothGattCharacteristic.PERMISSION_READ
+        )
+        goPlusService.addCharacteristic(deviceInfoChar)
+
+        services.add(goPlusService)
+        Log.i(TAG, "Created GO Plus service with UUID $SERVICE_UUID")
+
+        // Battery Service
+        val batteryService = BluetoothGattService(BATTERY_SERVICE_UUID, BluetoothGattService.SERVICE_TYPE_PRIMARY)
+
+        val batteryChar = BluetoothGattCharacteristic(
+            BATTERY_CHAR_UUID,
+            BluetoothGattCharacteristic.PROPERTY_READ or BluetoothGattCharacteristic.PROPERTY_NOTIFY,
+            BluetoothGattCharacteristic.PERMISSION_READ
+        )
+        val batteryCccd = BluetoothGattDescriptor(
+            CLIENT_CONFIG_DESCRIPTOR_UUID,
+            BluetoothGattDescriptor.PERMISSION_READ or BluetoothGattDescriptor.PERMISSION_WRITE
+        )
+        batteryChar.addDescriptor(batteryCccd)
+        batteryService.addCharacteristic(batteryChar)
+
+        val modelChar = BluetoothGattCharacteristic(
+            MODEL_CHAR_UUID,
+            BluetoothGattCharacteristic.PROPERTY_READ,
+            BluetoothGattCharacteristic.PERMISSION_READ
+        )
+        batteryService.addCharacteristic(modelChar)
+
+        val serialChar = BluetoothGattCharacteristic(
+            SERIAL_CHAR_UUID,
+            BluetoothGattCharacteristic.PROPERTY_READ,
+            BluetoothGattCharacteristic.PERMISSION_READ
+        )
+        batteryService.addCharacteristic(serialChar)
+
+        services.add(batteryService)
+        Log.i(TAG, "Created Battery service with UUID $BATTERY_SERVICE_UUID")
+
+        return services
+    }
+
     private fun handleStateCharWrite(device: BluetoothDevice?, data: ByteArray?) {
         if (data == null || data.size < 4) return
 
