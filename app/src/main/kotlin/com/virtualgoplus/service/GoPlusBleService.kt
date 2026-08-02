@@ -4,12 +4,11 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.app.Service
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
-import android.bluetooth.BluetoothOppLauncher
 import android.bluetooth.BluetoothProfile
-import android.bluetooth.BluetoothUuid
 import android.bluetooth.le.AdvertiseCallback
 import android.bluetooth.le.AdvertiseData
 import android.bluetooth.le.AdvertiseSettings
@@ -20,11 +19,10 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.os.Binder
 import android.os.Build
+import android.os.IBinder
 import android.os.ParcelUuid
-import android.os.Parcelable
 import android.util.Log
 import androidx.core.app.NotificationCompat
-import com.virtualgoplus.R
 import com.virtualgoplus.gatt.GattServerManager
 import com.virtualgoplus.ui.MainActivity
 import kotlinx.coroutines.CoroutineScope
@@ -142,7 +140,7 @@ class GoPlusBleService : Service() {
             addAction(BluetoothDevice.ACTION_ACL_DISCONNECTED)
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(pairingReceiver, filter, RECEIVER_NOT_EXPORTED)
+            registerReceiver(pairingReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
         } else {
             registerReceiver(pairingReceiver, filter)
         }
