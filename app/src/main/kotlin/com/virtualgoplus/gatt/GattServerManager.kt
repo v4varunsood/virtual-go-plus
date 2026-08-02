@@ -5,7 +5,6 @@ import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothGattDescriptor
-import android.bluetooth.BluetoothGattServer
 import android.bluetooth.BluetoothGattServerCallback
 import android.bluetooth.BluetoothGattService
 import android.bluetooth.BluetoothManager
@@ -23,21 +22,31 @@ class GattServerManager(
     companion object {
         private const val TAG = "GattServerManager"
 
-        // SFIDA Service & Characteristic UUIDs
-        val SFIDA_SERVICE_UUID: UUID = UUID.fromString("20800001-1A0E-11E6-B67B-9E2114713E2C")
-        val STATE_CHARACTERISTIC_UUID: UUID = UUID.fromString("20800002-1A0E-11E6-B67B-9E2114713E2C")
-
         // GO Plus Service UUID (official)
         val GOPLUS_SERVICE_UUID: UUID = GoPlusBleService.GOPLUS_SERVICE_UUID
 
-        // Client characteristic configuration descriptor UUID (standard)
+        // SFIDA Service & Characteristic UUIDs (used by some GO Plus clones)
+        val SFIDA_SERVICE_UUID: UUID = UUID.fromString("20800001-1A0E-11E6-B67B-9E2114713E2C")
+        val STATE_CHARACTERISTIC_UUID: UUID = UUID.fromString("20800002-1A0E-11E6-B67B-9E2114713E2C")
+
+        // Client characteristic configuration descriptor UUID
         val CLIENT_CONFIG_DESCRIPTOR_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
+
+        // GO Plus protocol characteristic UUIDs (known from reverse engineering)
+        val GOPLUS_WRITE_CHAR_UUID: UUID = UUID.fromString("0000FEBE-0000-1000-8000-00805F9B34FB")
+        val GOPLUS_NOTIFY_CHAR_UUID: UUID = UUID.fromString("0000FEBD-0000-1000-8000-00805F9B34FB")
+
+        // Default response bytes for reads
+        private val DEFAULT_DEVICE_INFO = byteArrayOf(
+            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+        )
     }
 
-    private var bluetoothGattServer: BluetoothGattServer? = null
+    private var bluetoothGattServer: android.bluetooth.BluetoothGattServer? = null
     var autoCatcherEngine: AutoCatcherEngine? = null
-    private var stateCharacteristic: BluetoothGattCharacteristic? = null
     private var connectedDevice: BluetoothDevice? = null
+    private var writeCharacteristic: BluetoothGattCharacteristic? = null
+    private var notifyCharacteristic: BluetoothGattCharacteristic? = null
 
     fun initialize() {
         val bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
@@ -48,37 +57,56 @@ class GattServerManager(
                 return
             }
 
-        // Add SFIDA service
-        val sfidaService = BluetoothGattService(
-            SFIDA_SERVICE_UUID,
-            0 // SERVICE_TYPE_PRIMARY
-        )
-
-        // State characteristic — Notify + Read
-        stateCharacteristic = BluetoothGattCharacteristic(
-            STATE_CHARACTERISTIC_UUID,
-            BluetoothGattCharacteristic.PROPERTY_NOTIFY or BluetoothGattCharacteristic.PROPERTY_READ,
-            BluetoothGattCharacteristic.PERMISSION_READ
-        )
-
-        // Add client config descriptor for notifications
-        val clientConfig = BluetoothGattDescriptor(
-            CLIENT_CONFIG_DESCRIPTOR_UUID,
-            BluetoothGattCharacteristic.PERMISSION_READ or BluetoothGattCharacteristic.PERMISSION_WRITE
-        )
-        stateCharacteristic?.addDescriptor(clientConfig)
-
-        sfidaService.addCharacteristic(stateCharacteristic)
-        bluetoothGattServer?.addService(sfidaService)
-
-        // Also add GO Plus service
+        // Primary GO Plus service
         val goPlusService = BluetoothGattService(
             GOPLUS_SERVICE_UUID,
             0 // SERVICE_TYPE_PRIMARY
         )
-        bluetoothGattServer?.addService(goPlusService)
 
-        Log.i(TAG, "GATT server initialized with SFIDA and GO Plus services")
+        // Write characteristic (game -> GO Plus) — Write Without Response
+        writeCharacteristic = BluetoothGattCharacteristic(
+            GOPLUS_SERVICE_UUID, // same UUID for write
+            BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE or
+                    BluetoothGattCharacteristic.PROPERTY_WRITE or
+                    BluetoothGattCharacteristic.PROPERTY_READ,
+            BluetoothGattCharacteristic.PERMISSION_WRITE
+        )
+        goPlusService.addCharacteristic(writeCharacteristic)
+
+        // Notify characteristic (GO Plus -> game)
+        notifyCharacteristic = BluetoothGattCharacteristic(
+            GOPLUS_NOTIFY_CHAR_UUID,
+            BluetoothGattCharacteristic.PROPERTY_NOTIFY or
+                    BluetoothGattCharacteristic.PROPERTY_READ,
+            BluetoothGattCharacteristic.PERMISSION_READ
+        )
+        val clientConfig = BluetoothGattDescriptor(
+            CLIENT_CONFIG_DESCRIPTOR_UUID,
+            BluetoothGattCharacteristic.PERMISSION_READ or BluetoothGattCharacteristic.PERMISSION_WRITE
+        )
+        notifyCharacteristic?.addDescriptor(clientConfig)
+        goPlusService.addCharacteristic(notifyCharacteristic)
+
+        // Also add SFIDA service for compatibility
+        val sfidaService = BluetoothGattService(
+            SFIDA_SERVICE_UUID,
+            0
+        )
+        val stateChar = BluetoothGattCharacteristic(
+            STATE_CHARACTERISTIC_UUID,
+            BluetoothGattCharacteristic.PROPERTY_NOTIFY or BluetoothGattCharacteristic.PROPERTY_READ,
+            BluetoothGattCharacteristic.PERMISSION_READ
+        )
+        stateChar.addDescriptor(BluetoothGattDescriptor(
+            CLIENT_CONFIG_DESCRIPTOR_UUID,
+            BluetoothGattCharacteristic.PERMISSION_READ or BluetoothGattCharacteristic.PERMISSION_WRITE
+        ))
+        sfidaService.addCharacteristic(stateChar)
+
+        bluetoothGattServer?.addService(goPlusService)
+        bluetoothGattServer?.addService(sfidaService)
+
+        Log.i(TAG, "GATT server initialized with GO Plus + SFIDA services")
     }
 
     fun shutdown() {
@@ -86,17 +114,36 @@ class GattServerManager(
         bluetoothGattServer = null
     }
 
-    fun sendStateNotification(state: Byte) {
-        stateCharacteristic?.let { char ->
-            char.value = byteArrayOf(state)
+    /**
+     * Send a notification to the connected game app.
+     * 0x01 = button pressed / action confirmed
+     * 0x02 = connected idle
+     * 0x03 = pokemon caught
+     * 0x04 = pokestop spun
+     */
+    fun sendNotification(data: ByteArray) {
+        notifyCharacteristic?.let { char ->
+            char.value = data
             connectedDevice?.let { device ->
-                bluetoothGattServer?.notifyCharacteristicChanged(
-                    device,
-                    char,
-                    false
-                )
+                bluetoothGattServer?.notifyCharacteristicChanged(device, char, false)
             }
         }
+    }
+
+    fun sendButtonPress() {
+        sendNotification(byteArrayOf(0x01))
+    }
+
+    fun sendConnected() {
+        sendNotification(byteArrayOf(0x02))
+    }
+
+    fun sendCatchSuccess() {
+        sendNotification(byteArrayOf(0x03))
+    }
+
+    fun sendSpinSuccess() {
+        sendNotification(byteArrayOf(0x04))
     }
 
     private val gattServerCallback = object : BluetoothGattServerCallback() {
@@ -104,10 +151,12 @@ class GattServerManager(
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> {
                     connectedDevice = device
-                    Log.i(TAG, "Device connected: ${device?.address}")
+                    Log.i(TAG, "Game app connected: ${device?.address}")
+                    // Send connected state
+                    sendConnected()
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
-                    Log.i(TAG, "Device disconnected")
+                    Log.i(TAG, "Game app disconnected")
                     connectedDevice = null
                 }
             }
@@ -127,16 +176,15 @@ class GattServerManager(
             offset: Int,
             characteristic: BluetoothGattCharacteristic?
         ) {
-            Log.i(TAG, "Characteristic read request: ${characteristic?.uuid}")
-            characteristic?.let { char ->
-                bluetoothGattServer?.sendResponse(
-                    device,
-                    requestId,
-                    BluetoothGatt.GATT_SUCCESS,
-                    0,
-                    byteArrayOf(0x02) // default connected state
-                )
-            }
+            val uuid = characteristic?.uuid
+            Log.i(TAG, "Characteristic READ: $uuid (offset=$offset)")
+            bluetoothGattServer?.sendResponse(
+                device,
+                requestId,
+                BluetoothGatt.GATT_SUCCESS,
+                0,
+                DEFAULT_DEVICE_INFO
+            )
         }
 
         override fun onCharacteristicWriteRequest(
@@ -148,12 +196,12 @@ class GattServerManager(
             offset: Int,
             value: ByteArray?
         ) {
-            val charUuid = characteristic?.uuid
+            val uuid = characteristic?.uuid
             val data = value?.toList() ?: emptyList()
-            Log.i(TAG, "Characteristic write request — UUID: $charUuid, data: $data")
+            Log.i(TAG, "Characteristic WRITE: $uuid data=${data.joinToString { "%02X".format(it) }}")
 
-            // Route to auto-catcher engine for processing
-            autoCatcherEngine?.onWriteRequest(charUuid, data, requestId, device)
+            // Route to auto-catcher engine
+            autoCatcherEngine?.onWriteRequest(uuid, data, requestId, device)
 
             if (responseNeeded) {
                 bluetoothGattServer?.sendResponse(
@@ -175,8 +223,25 @@ class GattServerManager(
             offset: Int,
             value: ByteArray?
         ) {
-            Log.i(TAG, "Descriptor write: ${descriptor?.uuid}, value: ${value?.toList()}")
+            Log.i(TAG, "Descriptor write: ${descriptor?.uuid}, value=${value?.toList()?.joinToString { "%02X".format(it) }}")
             if (responseNeeded) {
+                bluetoothGattServer?.sendResponse(
+                    device,
+                    requestId,
+                    BluetoothGatt.GATT_SUCCESS,
+                    0,
+                    null
+                )
+            }
+        }
+
+        override fun onExecuteWriteRequest(
+            device: BluetoothDevice?,
+            requestId: Int,
+            executeWrite: Boolean
+        ) {
+            Log.i(TAG, "Execute write: execute=$executeWrite")
+            if (executeWrite) {
                 bluetoothGattServer?.sendResponse(
                     device,
                     requestId,

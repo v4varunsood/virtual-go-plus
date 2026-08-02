@@ -4,18 +4,24 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
-import android.app.Service
 import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
+import android.bluetooth.BluetoothOppLauncher
+import android.bluetooth.BluetoothProfile
+import android.bluetooth.BluetoothUuid
 import android.bluetooth.le.AdvertiseCallback
 import android.bluetooth.le.AdvertiseData
 import android.bluetooth.le.AdvertiseSettings
 import android.bluetooth.le.BluetoothLeAdvertiser
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.os.Binder
 import android.os.Build
-import android.os.IBinder
+import android.os.ParcelUuid
+import android.os.Parcelable
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.virtualgoplus.R
@@ -34,9 +40,16 @@ class GoPlusBleService : Service() {
         private const val CHANNEL_ID = "VirtualGoPlusChannel"
         private const val NOTIFICATION_ID = 1001
 
-        // Official GO Plus BLE UUID
+        // Official GO Plus BLE service UUID
         val GOPLUS_SERVICE_UUID: java.util.UUID =
             java.util.UUID.fromString("0000FEBE-0000-1000-8000-00805F9B34FB")
+
+        // The exact device name Niantic's app looks for
+        const val TARGET_DEVICE_NAME = "GO Plus"
+
+        private val TARGET_SERVICE_UUIDS: Array<ParcelUuid> = arrayOf(
+            ParcelUuid(GOPLUS_SERVICE_UUID)
+        )
     }
 
     private val binder = LocalBinder()
@@ -49,16 +62,73 @@ class GoPlusBleService : Service() {
     var connectionState: ConnectionState = ConnectionState.DISCONNECTED
         private set
 
-    enum class ConnectionState { ADVERTISING, CONNECTED, DISCONNECTED }
+    enum class ConnectionState { ADVERTISING, CONNECTED, DISCONNECTED, PAIRING }
 
-    inner class LocalBinder : Binder() {
+    inner class LocalBinder : Binder {
         fun getService(): GoPlusBleService = this@GoPlusBleService
+    }
+
+    // Pairing broadcast receiver
+    private val pairingReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                BluetoothDevice.ACTION_PAIRING_REQUEST -> {
+                    val device: BluetoothDevice? = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
+                    Log.i(TAG, "Pairing request from: ${device?.address}")
+                    connectionState = ConnectionState.PAIRING
+                    updateNotification("Pairing...")
+
+                    // Auto-accept the pairing with PIN 000000
+                    // Use reflection to avoid API compatibility issues
+                    try {
+                        // Abort broadcast and set pairing confirmation
+                        val abortBroadcast = intent.getBooleanExtra("abortBroadcast", false)
+                        if (abortBroadcast) {
+                            Log.i(TAG, "Auto-accepting pairing request")
+                            // Try to set PIN
+                            device?.setPin("000000".toByteArray())
+                            // Confirm the pairing
+                            device?.setPairingConfirmation(true)
+                        }
+                    } catch (e: SecurityException) {
+                        Log.e(TAG, "Pairing security error: ${e.message}")
+                    }
+                }
+                BluetoothDevice.ACTION_BOND_STATE_CHANGED -> {
+                    val state = intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, -1)
+                    val prevState = intent.getIntExtra(BluetoothDevice.EXTRA_PREVIOUS_BOND_STATE, -1)
+                    Log.i(TAG, "Bond state: $prevState -> $state")
+                    when (state) {
+                        BluetoothDevice.BOND_BONDED -> {
+                            Log.i(TAG, "Paired successfully!")
+                            notifyConnectionState(ConnectionState.CONNECTED)
+                        }
+                        BluetoothDevice.BOND_NONE -> {
+                            Log.i(TAG, "Pairing removed")
+                        }
+                    }
+                }
+            }
+        }
     }
 
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
         initGattServer()
+
+        // Register for pairing broadcasts
+        val filter = IntentFilter().apply {
+            addAction(BluetoothDevice.ACTION_PAIRING_REQUEST)
+            addAction(BluetoothDevice.ACTION_BOND_STATE_CHANGED)
+            addAction(BluetoothDevice.ACTION_ACL_CONNECTED)
+            addAction(BluetoothDevice.ACTION_ACL_DISCONNECTED)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(pairingReceiver, filter, RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(pairingReceiver, filter)
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -74,6 +144,11 @@ class GoPlusBleService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         stopAdvertising()
+        try {
+            unregisterReceiver(pairingReceiver)
+        } catch (e: Exception) {
+            Log.w(TAG, "Receiver not registered: ${e.message}")
+        }
         serviceScope.cancel()
     }
 
@@ -122,16 +197,31 @@ class GoPlusBleService : Service() {
             return
         }
 
+        // Set the Bluetooth device name to "GO Plus" so Niantic's app finds it
+        try {
+            val setResult = bluetoothAdapter.setName(TARGET_DEVICE_NAME)
+            Log.i(TAG, "Set device name result: $setResult, current: ${bluetoothAdapter.name}")
+        } catch (e: SecurityException) {
+            Log.e(TAG, "Cannot set device name: ${e.message}")
+        }
+
         gattServerManager = GattServerManager(this, bluetoothAdapter)
         gattServerManager?.initialize()
     }
 
+    @Suppress("DEPRECATION")
     fun startAdvertising() {
         if (isAdvertising) return
 
         val bluetoothManager = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
-        val bluetoothAdapter: BluetoothManager? = bluetoothManager
-        bluetoothLeAdvertiser = bluetoothAdapter?.adapter?.bluetoothLeAdvertiser
+        val bluetoothAdapter: BluetoothAdapter? = bluetoothManager.adapter
+
+        if (bluetoothAdapter == null) {
+            Log.e(TAG, "Bluetooth adapter not available")
+            return
+        }
+
+        bluetoothLeAdvertiser = bluetoothAdapter.bluetoothLeAdvertiser
 
         if (bluetoothLeAdvertiser == null) {
             Log.e(TAG, "BLE advertiser not available")
@@ -146,11 +236,15 @@ class GoPlusBleService : Service() {
             .setConnectable(true)
             .build()
 
+        // Include the GO Plus service UUID in the advertising data
+        // and the specific device name Niantic looks for
         val data = AdvertiseData.Builder()
-            .setIncludeDeviceName(true)
-            .addServiceUuid(android.os.ParcelUuid(GOPLUS_SERVICE_UUID))
+            .setIncludeDeviceName(false) // Don't include generic name, set explicitly below
+            .addServiceUuid(ParcelUuid(GOPLUS_SERVICE_UUID))
             .build()
 
+        // Also set device name via BluetoothAdapter (done in initGattServer)
+        // The name is what the phone advertises as
         bluetoothLeAdvertiser?.startAdvertising(settings, data, advertiseCallback)
     }
 
@@ -167,23 +261,31 @@ class GoPlusBleService : Service() {
         override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
             isAdvertising = true
             connectionState = ConnectionState.ADVERTISING
-            updateNotification("Advertising — Waiting for connection")
-            Log.i(TAG, "BLE advertising started")
+            updateNotification("Advertising as '$TARGET_DEVICE_NAME' — Waiting for connection")
+            Log.i(TAG, "BLE advertising started as '$TARGET_DEVICE_NAME'")
         }
 
         override fun onStartFailure(errorCode: Int) {
-            Log.e(TAG, "BLE advertising failed: $errorCode")
+            val reason = when (errorCode) {
+                ADVERTISE_FAILED_ALREADY_STARTED -> "already started"
+                ADVERTISE_FAILED_FEATURE_UNSUPPORTED -> "feature unsupported"
+                ADVERTISE_FAILED_INTERNAL_ERROR -> "internal error"
+                ADVERTISE_FAILED_TOO_MANY_ADVERTISERS -> "too many advertisers"
+                else -> "error $errorCode"
+            }
+            Log.e(TAG, "BLE advertising failed: $reason")
             connectionState = ConnectionState.DISCONNECTED
-            updateNotification("Advertising failed (error: $errorCode)")
+            updateNotification("Advertising failed: $reason")
         }
     }
 
     fun notifyConnectionState(state: ConnectionState) {
         connectionState = state
         val text = when (state) {
-            ConnectionState.ADVERTISING -> "Advertising — Waiting for connection"
-            ConnectionState.CONNECTED -> "Connected to game"
+            ConnectionState.ADVERTISING -> "Advertising as '$TARGET_DEVICE_NAME' — Waiting for connection"
+            ConnectionState.CONNECTED -> "Connected to Pokémon GO"
             ConnectionState.DISCONNECTED -> "Disconnected"
+            ConnectionState.PAIRING -> "Pairing in progress..."
         }
         updateNotification(text)
     }
