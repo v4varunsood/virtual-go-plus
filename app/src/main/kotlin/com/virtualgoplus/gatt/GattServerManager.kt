@@ -24,11 +24,12 @@ class GattServerManager(
     companion object {
         private const val TAG = "GattServerManager"
 
-        // iAnyGo/iPogo custom SFIDA-like UUIDs (reverse-engineered from iAnyGo)
+        // iAnyGo/iPogo custom SFIDA-like UUIDs (reverse-engineered from iAnyGo v1.0.0)
         val SERVICE_UUID: UUID = UUID.fromString("bbe87709-5b89-4433-ab7f-8b8eef0d8e37")
         val STATE_CHAR_UUID: UUID = UUID.fromString("bbe87709-5b89-4433-ab7f-8b8eef0d8e38")
         val CONFIG_CHAR_UUID: UUID = UUID.fromString("bbe87709-5b89-4433-ab7f-8b8eef0d8e39")
         val DEVICE_INFO_CHAR_UUID: UUID = UUID.fromString("bbe87709-5b89-4433-ab7f-8b8eef0d8e3a")
+        val CONFIG2_CHAR_UUID: UUID = UUID.fromString("bbe87709-5b89-4433-ab7f-8b8eef0d8e3b")
 
         // Battery Service
         val BATTERY_SERVICE_UUID: UUID = UUID.fromString("21c50462-67cb-63a3-5c4c-82b5b9939aeb")
@@ -39,9 +40,13 @@ class GattServerManager(
         // CCCD Descriptor UUID
         val CLIENT_CONFIG_DESCRIPTOR_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 
-        // iAnyGo uses button press byte 0x01 (confirmed from smali)
-        const val BUTTON_PRESS_BYTE: Byte = 0x01
-        const val BUTTON_RELEASE_BYTE: Byte = 0x00
+        // Protocol response bytes (from iAnyGo smali reverse-engineering)
+        // Case "00 00 00 00" (button press) → send [0x04, 0x00, 0x23, 0x00]
+        val RESPONSE_00_00_00_00 = byteArrayOf(0x04, 0x00, 0x23, 0x00)
+        // Case "01 00 00 00" (button release) → send [0x01, 0x00, 0x00, 0x00]
+        val RESPONSE_01_00_00_00 = byteArrayOf(0x01, 0x00, 0x00, 0x00)
+        // Case "02 00 00 00" (connected/pairing) → send [0x02, 0x00, 0x00, 0x00]
+        val RESPONSE_02_00_00_00 = byteArrayOf(0x02, 0x00, 0x00, 0x00)
     }
 
     private var bluetoothManager: BluetoothManager? = null
@@ -53,23 +58,26 @@ class GattServerManager(
     // PGPCert native handle (0 = not initialized)
     private var pgpCertHandle: Long = 0
 
+    // Track connection/auth state
+    private var isAuthenticated = false
+    private var isButtonPressed = false
+
     init {
         bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
         bluetoothAdapter = bluetoothManager?.adapter
     }
 
     fun start() {
-        initGattServer()
         initNativeCert()
+        initGattServer()
     }
 
     private fun initNativeCert() {
         try {
             System.loadLibrary("_pgp_cert")
-            val cls = Class.forName("com.pogoskill.fakegps.PGPCert")
-            // We'll init with empty string for now - real app needs userId from their server
-            pgpCertHandle = 0
-            Log.i(TAG, "PGPCert native library loaded")
+            // Initialize with empty userId — real app needs valid userId from iAnyGo account
+            // pgpCertHandle = PGPCert.initInstance("", "", false)
+            Log.i(TAG, "PGPCert native library loaded (not initialized — no valid userId)")
         } catch (e: Throwable) {
             Log.e(TAG, "Failed to load PGPCert: ${e.message}")
         }
@@ -83,6 +91,8 @@ class GattServerManager(
                     BluetoothProfile.STATE_CONNECTED -> {
                         connectedDevice = device
                         notifyDevice = device
+                        isAuthenticated = false
+                        isButtonPressed = false
                         Log.i(TAG, "Device connected: ${device?.address}")
                         onDeviceConnected()
                     }
@@ -90,6 +100,8 @@ class GattServerManager(
                         Log.i(TAG, "Device disconnected")
                         connectedDevice = null
                         notifyDevice = null
+                        isAuthenticated = false
+                        isButtonPressed = false
                         onDeviceDisconnected()
                     }
                 }
@@ -110,19 +122,18 @@ class GattServerManager(
             ) {
                 val uuid = characteristic?.uuid
                 Log.i(TAG, "=== CHAR READ requestId=$requestId offset=$offset char=$uuid")
-                
+
                 when (uuid) {
                     STATE_CHAR_UUID -> {
-                        // Return button press state (0x01 = pressed)
-                        val value = byteArrayOf(BUTTON_RELEASE_BYTE)
+                        // Return current button state
+                        val value = if (isButtonPressed) byteArrayOf(0x01) else byteArrayOf(0x00)
                         gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
                         Log.i(TAG, "Read STATE_CHAR -> %02X".format(value[0]))
                     }
                     DEVICE_INFO_CHAR_UUID -> {
-                        // Return "Virtual GO Plus" device info
-                        val info = "Virtual GO Plus".toByteArray()
+                        val info = "Pokemon GO Plus".toByteArray()
                         gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, info)
-                        Log.i(TAG, "Read DEVICE_INFO -> Virtual GO Plus")
+                        Log.i(TAG, "Read DEVICE_INFO -> Pokemon GO Plus")
                     }
                     BATTERY_CHAR_UUID -> {
                         val battery = byteArrayOf(100) // 100%
@@ -160,15 +171,9 @@ class GattServerManager(
                 }
 
                 when (uuid) {
-                    STATE_CHAR_UUID -> {
-                        Log.i(TAG, "STATE_CHAR write -> $dataHex")
-                    }
-                    CONFIG_CHAR_UUID -> {
-                        Log.i(TAG, "CONFIG_CHAR write -> $dataHex")
-                    }
-                    else -> {
-                        Log.i(TAG, "Unknown char write: $uuid = $dataHex")
-                    }
+                    STATE_CHAR_UUID -> handleStateCharWrite(device, value)
+                    CONFIG_CHAR_UUID -> handleConfigCharWrite(device, value)
+                    else -> Log.i(TAG, "Unknown char write: $uuid = $dataHex")
                 }
             }
 
@@ -186,8 +191,7 @@ class GattServerManager(
                 val dataHex = value?.joinToString(" ") { "%02X".format(it) } ?: "null"
                 Log.i(TAG, "=== DESCRIPTOR WRITE requestId=$requestId desc=$descUuid char=$charUuid value=$dataHex")
 
-                // CRITICAL: Set the descriptor value BEFORE responding
-                // This is what iAnyGo does - the key difference from our old code
+                // CRITICAL: Set the descriptor value BEFORE responding (iAnyGo's approach)
                 if (value != null) {
                     descriptor?.setValue(value)
                 }
@@ -198,23 +202,20 @@ class GattServerManager(
                 }
 
                 // Check if this is CCCD enabling notifications on STATE_CHAR
-                // iAnyGo uses CCCD value 0x0100 to enable notifications
                 if (descUuid == CLIENT_CONFIG_DESCRIPTOR_UUID && charUuid == STATE_CHAR_UUID) {
                     val cccd = descriptor?.getValue()
                     val cccdInt = if (cccd != null && cccd.size >= 2) {
                         (cccd[0].toInt() and 0xFF) or ((cccd[1].toInt() and 0xFF) shl 8)
                     } else 0
-                    
+
                     Log.i(TAG, "CCCD for STATE_CHAR = 0x${Integer.toHexString(cccdInt)}")
-                    
+
                     if (cccdInt and 0x01 != 0) {
-                        // Notifications enabled
+                        // Notifications enabled — this is the "Press the button" trigger
+                        // iAnyGo auto-sends button press here
                         notifyDevice = device
-                        Log.i(TAG, "Notifications ENABLED on STATE_CHAR")
-                        
-                        // CRITICAL: Auto-send button press when notifications are enabled
-                        // This is what advances the pairing past "Press the button" screen
-                        // iAnyGo does this in onDescriptorWriteRequest
+                        Log.i(TAG, "Notifications ENABLED on STATE_CHAR — sending auto button press")
+
                         android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
                             sendButtonPress()
                         }, 100)
@@ -240,7 +241,6 @@ class GattServerManager(
         gattServer = bluetoothManager?.openGattServer(context, gattServerCallback)
         Log.i(TAG, "GATT server opened: $gattServer")
 
-        // Add services
         val services = createServices()
         for (service in services) {
             val added = gattServer?.addService(service) ?: false
@@ -248,109 +248,84 @@ class GattServerManager(
         }
     }
 
-    private fun createServices(): List<BluetoothGattService> {
-        val services = mutableListOf<BluetoothGattService>()
+    private fun handleStateCharWrite(device: BluetoothDevice?, data: ByteArray?) {
+        if (data == null || data.size < 4) return
 
-        // Primary GO Plus Service
-        val goPlusService = BluetoothGattService(SERVICE_UUID, BluetoothGattService.SERVICE_TYPE_PRIMARY)
+        val dataStr = data.take(4).joinToString(" ") { "%02X".format(it) }
+        Log.i(TAG, "STATE_CHAR write: [$dataStr]")
 
-        // State characteristic - READ + NOTIFY (properties 0x08 | 0x10 = 0x18)
-        val stateChar = BluetoothGattCharacteristic(
-            STATE_CHAR_UUID,
-            BluetoothGattCharacteristic.PROPERTY_READ or BluetoothGattCharacteristic.PROPERTY_NOTIFY,
-            BluetoothGattCharacteristic.PERMISSION_READ
-        )
-        // CCCD descriptor for notifications
-        val stateCccd = BluetoothGattDescriptor(
-            CLIENT_CONFIG_DESCRIPTOR_UUID,
-            BluetoothGattDescriptor.PERMISSION_READ or BluetoothGattDescriptor.PERMISSION_WRITE
-        )
-        stateChar.addDescriptor(stateCccd)
-        goPlusService.addCharacteristic(stateChar)
+        // Protocol from iAnyGo reverse-engineering:
+        // The FIRST 4 bytes determine the response type
+        val first4 = data.copyOfRange(0, minOf(4, data.size))
 
-        // Config characteristic - WRITE (property 0x04)
-        val configChar = BluetoothGattCharacteristic(
-            CONFIG_CHAR_UUID,
-            BluetoothGattCharacteristic.PROPERTY_WRITE,
-            BluetoothGattCharacteristic.PERMISSION_WRITE
-        )
-        goPlusService.addCharacteristic(configChar)
+        val response: ByteArray = when {
+            // Case 1: "00 00 00 00" → button press ( Pokémon encounters)
+            first4.contentEquals(byteArrayOf(0x00, 0x00, 0x00, 0x00)) -> {
+                Log.i(TAG, "→ Case: BUTTON PRESS (00 00 00 00)")
+                isButtonPressed = true
+                RESPONSE_00_00_00_00
+            }
+            // Case 2: "01 00 00 00" → button release
+            first4.contentEquals(byteArrayOf(0x01, 0x00, 0x00, 0x00)) -> {
+                Log.i(TAG, "→ Case: BUTTON RELEASE (01 00 00 00)")
+                isButtonPressed = false
+                RESPONSE_01_00_00_00
+            }
+            // Case 3: "02 00 00 00" → connected/pairing confirmation
+            first4.contentEquals(byteArrayOf(0x02, 0x00, 0x00, 0x00)) -> {
+                Log.i(TAG, "→ Case: CONNECTED (02 00 00 00)")
+                isAuthenticated = true
+                RESPONSE_02_00_00_00
+            }
+            else -> {
+                Log.i(TAG, "→ Case: UNKNOWN — sending default response")
+                RESPONSE_02_00_00_00
+            }
+        }
 
-        // Device Info characteristic - READ (property 0x02)
-        val deviceInfoChar = BluetoothGattCharacteristic(
-            DEVICE_INFO_CHAR_UUID,
-            BluetoothGattCharacteristic.PROPERTY_READ,
-            BluetoothGattCharacteristic.PERMISSION_READ
-        )
-        goPlusService.addCharacteristic(deviceInfoChar)
-
-        services.add(goPlusService)
-        Log.i(TAG, "Created GO Plus service with UUID $SERVICE_UUID")
-
-        // Battery Service
-        val batteryService = BluetoothGattService(BATTERY_SERVICE_UUID, BluetoothGattService.SERVICE_TYPE_PRIMARY)
-
-        val batteryChar = BluetoothGattCharacteristic(
-            BATTERY_CHAR_UUID,
-            BluetoothGattCharacteristic.PROPERTY_READ or BluetoothGattCharacteristic.PROPERTY_NOTIFY,
-            BluetoothGattCharacteristic.PERMISSION_READ
-        )
-        val batteryCccd = BluetoothGattDescriptor(
-            CLIENT_CONFIG_DESCRIPTOR_UUID,
-            BluetoothGattDescriptor.PERMISSION_READ or BluetoothGattDescriptor.PERMISSION_WRITE
-        )
-        batteryChar.addDescriptor(batteryCccd)
-        batteryService.addCharacteristic(batteryChar)
-
-        val modelChar = BluetoothGattCharacteristic(
-            MODEL_CHAR_UUID,
-            BluetoothGattCharacteristic.PROPERTY_READ,
-            BluetoothGattCharacteristic.PERMISSION_READ
-        )
-        batteryService.addCharacteristic(modelChar)
-
-        val serialChar = BluetoothGattCharacteristic(
-            SERIAL_CHAR_UUID,
-            BluetoothGattCharacteristic.PROPERTY_READ,
-            BluetoothGattCharacteristic.PERMISSION_READ
-        )
-        batteryService.addCharacteristic(serialChar)
-
-        services.add(batteryService)
-        Log.i(TAG, "Created Battery service with UUID $BATTERY_SERVICE_UUID")
-
-        return services
+        // Send response via notification
+        sendNotification(response)
     }
 
-    fun sendButtonPress() {
+    private fun handleConfigCharWrite(device: BluetoothDevice?, data: ByteArray?) {
+        val dataHex = data?.joinToString(" ") { "%02X".format(it) } ?: "null"
+        Log.i(TAG, "CONFIG_CHAR write: [$dataHex]")
+        // Config writes don't typically get a response notification
+    }
+
+    private fun sendNotification(data: ByteArray) {
         val device = notifyDevice ?: connectedDevice
         val server = gattServer
-        
+
         if (device == null || server == null) {
-            Log.w(TAG, "Cannot send button press - no device or server")
+            Log.w(TAG, "Cannot send notification — no device or server")
             return
         }
 
         val service = server.getService(SERVICE_UUID)
         val characteristic = service?.getCharacteristic(STATE_CHAR_UUID)
-        
+
         if (characteristic == null) {
-            Log.w(TAG, "STATE_CHAR not found")
+            Log.w(TAG, "STATE_CHAR not found in service")
             return
         }
 
-        // Send button press (0x01) - iAnyGo's exact value confirmed from smali
-        characteristic.setValue(byteArrayOf(BUTTON_PRESS_BYTE))
+        characteristic.setValue(data)
         val sent = server.notifyCharacteristicChanged(device, characteristic, false)
-        
-        val dataHex = "01"
-        Log.i(TAG, "=== SEND BUTTON PRESS -> $dataHex sent=$sent")
+        val dataHex = data.joinToString(" ") { "%02X".format(it) }
+        Log.i(TAG, "=== NOTIFY [$dataHex] sent=$sent")
+    }
+
+    fun sendButtonPress() {
+        Log.i(TAG, "=== AUTO BUTTON PRESS ===")
+        isButtonPressed = true
+        sendNotification(RESPONSE_00_00_00_00)
 
         // Follow with button release after short delay
         android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-            characteristic.setValue(byteArrayOf(BUTTON_RELEASE_BYTE))
-            server.notifyCharacteristicChanged(device, characteristic, false)
-            Log.i(TAG, "=== SEND BUTTON RELEASE -> 00")
+            isButtonPressed = false
+            sendNotification(RESPONSE_01_00_00_00)
+            Log.i(TAG, "=== BUTTON RELEASE ===")
         }, 200)
     }
 
