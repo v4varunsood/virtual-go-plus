@@ -186,21 +186,5 @@ class GattServerManager(
                 )
             }
         }
-
-        override fun onExecuteWriteRequest(
-            device: BluetoothDevice?,
-            requestId: Int,
-            executeWrite: Boolean
-        ) {
-            if (executeWrite) {
-                bluetoothGattServer?.sendResponse(
-                    device,
-                    requestId,
-                    BluetoothGatt.GATT_SUCCESS,
-                    0,
-                    null
-                )
-            }
-        }
     }
 }
