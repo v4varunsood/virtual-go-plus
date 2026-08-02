@@ -51,7 +51,7 @@ class GattServerManager(
         // Add SFIDA service
         val sfidaService = BluetoothGattService(
             SFIDA_SERVICE_UUID,
-            BluetoothGatt.SERVICE_TYPE_PRIMARY
+            0 // SERVICE_TYPE_PRIMARY
         )
 
         // State characteristic — Notify + Read
@@ -74,7 +74,7 @@ class GattServerManager(
         // Also add GO Plus service
         val goPlusService = BluetoothGattService(
             GOPLUS_SERVICE_UUID,
-            BluetoothGatt.SERVICE_TYPE_PRIMARY
+            0 // SERVICE_TYPE_PRIMARY
         )
         bluetoothGattServer?.addService(goPlusService)
 
