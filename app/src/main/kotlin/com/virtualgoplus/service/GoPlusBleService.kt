@@ -64,45 +64,67 @@ class GoPlusBleService : Service() {
 
     // Pairing broadcast receiver
     private val pairingReceiver = object : BroadcastReceiver() {
+        @Suppress("DEPRECATION")
         override fun onReceive(context: Context?, intent: Intent?) {
             when (intent?.action) {
                 BluetoothDevice.ACTION_PAIRING_REQUEST -> {
                     val device: BluetoothDevice? = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
                     val pairingTransport = intent.getIntExtra(BluetoothDevice.EXTRA_TRANSPORT, BluetoothDevice.TRANSPORT_LE)
-                    Log.i(TAG, "Pairing request from: ${device?.address}, transport=$pairingTransport")
+                    val pairingVariant = intent.getIntExtra(BluetoothDevice.EXTRA_PAIRING_VARIANT, -1)
+                    Log.i(TAG, "=== PAIRING REQUEST === from=${device?.address} transport=$pairingTransport variant=$pairingVariant (${
+                        when (pairingVariant) {
+                            0 -> "PASSKEY_CONFIRMATION"
+                            1 -> "PASSKEY_DISPLAY"
+                            2 -> "PASSKEY_ENTRY"
+                            3 -> "CONSENT"
+                            4 -> "PRE_SIX_DIGIT_DH"
+                            5 -> "FINAL_DH"
+                            else -> "UNKNOWN"
+                        }
+                    })")
                     connectionState = ConnectionState.PAIRING
                     updateNotification("Pairing...")
 
-                    // Give the BLE stack 200ms to process before auto-accepting
-                    // This is critical — responding too fast gets ignored
                     serviceScope.launch {
-                        kotlinx.coroutines.delay(200L)
+                        kotlinx.coroutines.delay(300L)
+                        Log.i(TAG, "Auto-accepting pairing now...")
                         try {
+                            // Try the standard 000000 PIN approach first
                             device?.setPin("000000".toByteArray())
                             device?.setPairingConfirmation(true)
-                            Log.i(TAG, "Pairing auto-accepted (PIN=000000, confirm=true)")
+                            Log.i(TAG, "✅ setPin + setPairingConfirmation succeeded")
                         } catch (e: SecurityException) {
-                            Log.e(TAG, "Pairing security error: ${e.message}")
-                            // Try downgrade to just confirmation without PIN
+                            Log.e(TAG, "❌ setPin failed (need BLUETOOTH_CONNECT?): ${e.message}")
+                            // Android 12+ requires BLUETOOTH_CONNECT for setPin
+                            // Fall back to createBond which doesn't need explicit permission
                             try {
-                                device?.setPairingConfirmation(true)
+                                val bondResult = device?.createBond()
+                                Log.i(TAG, "✅ createBond fallback result: $bondResult")
                             } catch (e2: SecurityException) {
-                                Log.e(TAG, "Confirm also failed: ${e2.message}")
+                                Log.e(TAG, "❌ createBond also failed: ${e2.message}")
                             }
+                        } catch (e: Exception) {
+                            Log.e(TAG, "❌ Pairing error: ${e.message}")
                         }
                     }
                 }
                 BluetoothDevice.ACTION_BOND_STATE_CHANGED -> {
                     val state = intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, -1)
                     val prevState = intent.getIntExtra(BluetoothDevice.EXTRA_PREVIOUS_BOND_STATE, -1)
-                    Log.i(TAG, "Bond state: $prevState -> $state")
+                    val bondStateStr = when (state) {
+                        BluetoothDevice.BOND_BONDING -> "BONDING"
+                        BluetoothDevice.BOND_BONDED -> "BONDED ✅"
+                        BluetoothDevice.BOND_NONE -> "NONE ❌"
+                        else -> "UNKNOWN($state)"
+                    }
+                    Log.i(TAG, "=== BOND STATE === $prevState -> $bondStateStr")
                     when (state) {
                         BluetoothDevice.BOND_BONDED -> {
-                            Log.i(TAG, "✅ Paired successfully!")
+                            Log.i(TAG, "✅ PAIRING SUCCESS!")
                             notifyConnectionState(ConnectionState.CONNECTED)
                         }
                         BluetoothDevice.BOND_NONE -> {
-                            Log.i(TAG, "Pairing removed")
+                            Log.i(TAG, "❌ Pairing failed / removed")
                             notifyConnectionState(ConnectionState.DISCONNECTED)
                         }
                         BluetoothDevice.BOND_BONDING -> {
@@ -135,10 +157,14 @@ class GoPlusBleService : Service() {
             addAction(BluetoothDevice.ACTION_ACL_CONNECTED)
             addAction(BluetoothDevice.ACTION_ACL_DISCONNECTED)
         }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(pairingReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
-        } else {
-            registerReceiver(pairingReceiver, filter)
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(pairingReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                registerReceiver(pairingReceiver, filter)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to register pairing receiver: ${e.message}")
         }
     }
 
