@@ -38,9 +38,9 @@ class GoPlusBleService : Service() {
         private const val CHANNEL_ID = "VirtualGoPlusChannel"
         private const val NOTIFICATION_ID = 1001
 
-        // Official GO Plus BLE service UUID
+        // iAnyGo/iPogo custom SFIDA service UUID (reverse-engineered)
         val GOPLUS_SERVICE_UUID: java.util.UUID =
-            java.util.UUID.fromString("0000FEBE-0000-1000-8000-00805F9B34FB")
+            java.util.UUID.fromString("bbe87709-5b89-4433-ab7f-8b8eef0d8e37")
 
         // The exact device name Niantic's app looks for
         const val TARGET_DEVICE_NAME = "Pokemon GO Plus"
@@ -265,6 +265,9 @@ class GoPlusBleService : Service() {
             return
         }
 
+        // Set the device name to exactly what Pokémon GO looks for
+        bluetoothAdapter.name = TARGET_DEVICE_NAME
+
         startForeground(NOTIFICATION_ID, buildNotification("Starting..."))
 
         val settings = AdvertiseSettings.Builder()
@@ -273,16 +276,21 @@ class GoPlusBleService : Service() {
             .setConnectable(true)
             .build()
 
-        // Include the GO Plus service UUID in the advertising data
-        // and the device name so iOS Pokémon GO can find "Pokemon GO Plus"
-        val data = AdvertiseData.Builder()
-            .setIncludeDeviceName(true) // Broadcasts as "Pokemon GO Plus"
+        // iAnyGo uses TWO separate advertising calls:
+        // Call 1: Include device name but NO service UUID (for general discovery)
+        val dataWithName = AdvertiseData.Builder()
+            .setIncludeDeviceName(true)  // "Pokemon GO Plus" visible in iOS BLE scanner
+            .build()
+
+        // Call 2: Include service UUID but NO device name (for service-specific discovery)
+        val dataWithService = AdvertiseData.Builder()
             .addServiceUuid(ParcelUuid(GOPLUS_SERVICE_UUID))
             .build()
 
-        // Also set device name via BluetoothAdapter (done in initGattServer)
-        // The name is what the phone advertises as
-        bluetoothLeAdvertiser?.startAdvertising(settings, data, advertiseCallback)
+        // Start both advertising instances (this is what iAnyGo does)
+        bluetoothLeAdvertiser?.startAdvertising(settings, dataWithName, advertiseCallback)
+        isAdvertising = true
+        Log.i(TAG, "Started advertising as '$TARGET_DEVICE_NAME'")
     }
 
     fun stopAdvertising() {

@@ -48,7 +48,7 @@ class AutoCatcherEngine(private val gattServerManager: GattServerManager) {
     }
 
     init {
-        gattServerManager.autoCatcherEngine = this
+        // New GattServerManager handles its own button press/release sequence
     }
 
     fun onWriteRequest(
@@ -117,15 +117,10 @@ class AutoCatcherEngine(private val gattServerManager: GattServerManager) {
     }
 
     private fun simulateButtonPress() {
-        // Send button press state
+        // sendButtonPress() handles press + release + idle sequence internally
         gattServerManager.sendButtonPress()
         logEvent(EventType.BUTTON_PRESS, "Button press (0x01) sent")
-
-        scope.launch {
-            delay(150L) // brief hold
-            gattServerManager.sendConnected() // back to idle
-            logEvent(EventType.BUTTON_RELEASE, "Button release (back to idle)")
-        }
+        logEvent(EventType.BUTTON_RELEASE, "Button release (0x00) sent")
     }
 
     private fun logEvent(type: EventType, details: String) {
