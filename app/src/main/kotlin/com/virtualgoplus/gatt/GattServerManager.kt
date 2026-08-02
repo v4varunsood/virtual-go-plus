@@ -10,6 +10,8 @@ import android.bluetooth.BluetoothGattService
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import com.virtualgoplus.engine.AutoCatcherEngine
 import com.virtualgoplus.service.GoPlusBleService
@@ -39,18 +41,20 @@ class GattServerManager(
         // GO Plus protocol characteristic UUIDs (known from reverse engineering)
         val GOPLUS_WRITE_CHAR_UUID: UUID = UUID.fromString("0000FEBE-0000-1000-8000-00805F9B34FB")
         val GOPLUS_NOTIFY_CHAR_UUID: UUID = UUID.fromString("0000FEBD-0000-1000-8000-00805F9B34FB")
-
-        // Default response bytes for reads
-        private val DEFAULT_DEVICE_INFO = byteArrayOf(
-            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-        )
     }
 
     private var bluetoothGattServer: android.bluetooth.BluetoothGattServer? = null
     var autoCatcherEngine: AutoCatcherEngine? = null
     private var connectedDevice: BluetoothDevice? = null
-    private var writeCharacteristic: BluetoothGattCharacteristic? = null
-    private var notifyCharacteristic: BluetoothGattCharacteristic? = null
+
+    // Track the SFIDA State characteristic so we can send notifications on it
+    private var sfidaStateChar: BluetoothGattCharacteristic? = null
+    private var goPlusNotifyChar: BluetoothGattCharacteristic? = null
+
+    // Track which device has enabled notifications on SFIDA State char
+    private var sfidaNotifyDevice: BluetoothDevice? = null
+
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     fun initialize() {
         val bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
@@ -61,53 +65,58 @@ class GattServerManager(
                 return
             }
 
-        // Primary GO Plus service
+        // ── Primary GO Plus service (0xFEBE) ──────────────────────────────
         val goPlusService = BluetoothGattService(
             GOPLUS_SERVICE_UUID,
             0 // SERVICE_TYPE_PRIMARY
         )
 
-        // Write characteristic (game -> GO Plus) — Write Without Response
-        writeCharacteristic = BluetoothGattCharacteristic(
-            GOPLUS_SERVICE_UUID, // same UUID for write
+        // Write characteristic (game → GO Plus)
+        val writeChar = BluetoothGattCharacteristic(
+            GOPLUS_WRITE_CHAR_UUID,
             BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE or
                     BluetoothGattCharacteristic.PROPERTY_WRITE or
                     BluetoothGattCharacteristic.PROPERTY_READ,
             BluetoothGattCharacteristic.PERMISSION_WRITE
         )
-        goPlusService.addCharacteristic(writeCharacteristic)
+        goPlusService.addCharacteristic(writeChar)
 
-        // Notify characteristic (GO Plus -> game)
-        notifyCharacteristic = BluetoothGattCharacteristic(
+        // Notify characteristic (GO Plus → game)
+        goPlusNotifyChar = BluetoothGattCharacteristic(
             GOPLUS_NOTIFY_CHAR_UUID,
             BluetoothGattCharacteristic.PROPERTY_NOTIFY or
                     BluetoothGattCharacteristic.PROPERTY_READ,
             BluetoothGattCharacteristic.PERMISSION_READ
         )
-        val clientConfig = BluetoothGattDescriptor(
+        val goPlusCccd = BluetoothGattDescriptor(
             CLIENT_CONFIG_DESCRIPTOR_UUID,
             BluetoothGattCharacteristic.PERMISSION_READ or BluetoothGattCharacteristic.PERMISSION_WRITE
         )
-        notifyCharacteristic?.addDescriptor(clientConfig)
-        goPlusService.addCharacteristic(notifyCharacteristic)
+        goPlusNotifyChar?.addDescriptor(goPlusCccd)
+        goPlusService.addCharacteristic(goPlusNotifyChar)
 
-        // Also add SFIDA service for compatibility
+        // ── SFIDA service (for "Press the button" during pairing) ─────────
         val sfidaService = BluetoothGattService(
             SFIDA_SERVICE_UUID,
             0
         )
-        val stateChar = BluetoothGattCharacteristic(
+        // This is the key characteristic Pokémon GO reads/writes during pairing
+        // It must support NOTIFY so we can send button press events
+        sfidaStateChar = BluetoothGattCharacteristic(
             STATE_CHARACTERISTIC_UUID,
-            BluetoothGattCharacteristic.PROPERTY_NOTIFY or BluetoothGattCharacteristic.PROPERTY_READ,
-            BluetoothGattCharacteristic.PERMISSION_READ
+            BluetoothGattCharacteristic.PROPERTY_NOTIFY or
+                    BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE or
+                    BluetoothGattCharacteristic.PROPERTY_READ,
+            BluetoothGattCharacteristic.PERMISSION_WRITE
         )
-        stateChar.addDescriptor(BluetoothGattDescriptor(
+        val sfidaCccd = BluetoothGattDescriptor(
             CLIENT_CONFIG_DESCRIPTOR_UUID,
             BluetoothGattCharacteristic.PERMISSION_READ or BluetoothGattCharacteristic.PERMISSION_WRITE
-        ))
-        sfidaService.addCharacteristic(stateChar)
+        )
+        sfidaStateChar?.addDescriptor(sfidaCccd)
+        sfidaService.addCharacteristic(sfidaStateChar)
 
-        // Generic Access Service (0x1800) — required so iOS BLE scanner shows device name
+        // ── Generic Access Service (0x1800) — device name ─────────────────
         val gasService = BluetoothGattService(
             GENERIC_ACCESS_SERVICE_UUID,
             0
@@ -124,7 +133,7 @@ class GattServerManager(
         bluetoothGattServer?.addService(sfidaService)
         bluetoothGattServer?.addService(gasService)
 
-        Log.i(TAG, "GATT server initialized with GO Plus + SFIDA + Generic Access services")
+        Log.i(TAG, "GATT server initialized: GO Plus + SFIDA + GenericAccess")
     }
 
     fun shutdown() {
@@ -133,35 +142,50 @@ class GattServerManager(
     }
 
     /**
-     * Send a notification to the connected game app.
-     * 0x01 = button pressed / action confirmed
-     * 0x02 = connected idle
-     * 0x03 = pokemon caught
-     * 0x04 = pokestop spun
+     * Send a notification on the SFIDA State characteristic (button press signal).
+     * 0x02 = button press (the standard GO Plus button press byte)
+     * Called automatically when Pokémon GO enables notifications on the State char.
      */
-    fun sendNotification(data: ByteArray) {
-        notifyCharacteristic?.let { char ->
-            char.value = data
+    fun sendButtonPress() {
+        sfidaStateChar?.let { char ->
+            char.value = byteArrayOf(0x02)
+            sfidaNotifyDevice?.let { device ->
+                Log.i(TAG, "Sending button press 0x02 to SFIDA State char for ${device.address}")
+                bluetoothGattServer?.notifyCharacteristicChanged(device, char, false)
+            } ?: run {
+                Log.w(TAG, "No device subscribed to SFIDA State notifications yet")
+            }
+        } ?: Log.e(TAG, "SFIDA State char is null!")
+    }
+
+    /**
+     * Send connected/idle notification on GO Plus notify characteristic.
+     */
+    fun sendConnected() {
+        goPlusNotifyChar?.let { char ->
+            char.value = byteArrayOf(0x02)
             connectedDevice?.let { device ->
                 bluetoothGattServer?.notifyCharacteristicChanged(device, char, false)
             }
         }
     }
 
-    fun sendButtonPress() {
-        sendNotification(byteArrayOf(0x01))
-    }
-
-    fun sendConnected() {
-        sendNotification(byteArrayOf(0x02))
-    }
-
     fun sendCatchSuccess() {
-        sendNotification(byteArrayOf(0x03))
+        sfidaStateChar?.let { char ->
+            char.value = byteArrayOf(0x03)
+            sfidaNotifyDevice?.let { device ->
+                bluetoothGattServer?.notifyCharacteristicChanged(device, char, false)
+            }
+        }
     }
 
     fun sendSpinSuccess() {
-        sendNotification(byteArrayOf(0x04))
+        sfidaStateChar?.let { char ->
+            char.value = byteArrayOf(0x04)
+            sfidaNotifyDevice?.let { device ->
+                bluetoothGattServer?.notifyCharacteristicChanged(device, char, false)
+            }
+        }
     }
 
     private val gattServerCallback = object : BluetoothGattServerCallback() {
@@ -169,22 +193,27 @@ class GattServerManager(
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> {
                     connectedDevice = device
-                    Log.i(TAG, "Game app connected: ${device?.address}")
-                    // Send connected state
+                    Log.i(TAG, "Game connected: ${device?.address}")
+                    // Auto-send connected notification
                     sendConnected()
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
-                    Log.i(TAG, "Game app disconnected")
-                    connectedDevice = null
+                    Log.i(TAG, "Game disconnected")
+                    if (device == sfidaNotifyDevice) {
+                        sfidaNotifyDevice = null
+                    }
+                    if (device == connectedDevice) {
+                        connectedDevice = null
+                    }
                 }
             }
         }
 
         override fun onServiceAdded(status: Int, service: BluetoothGattService?) {
             if (status == BluetoothGatt.GATT_SUCCESS) {
-                Log.i(TAG, "GATT service added: ${service?.uuid}")
+                Log.i(TAG, "Service added: ${service?.uuid}")
             } else {
-                Log.e(TAG, "Failed to add GATT service: $status")
+                Log.e(TAG, "Failed to add service ${service?.uuid}: $status")
             }
         }
 
@@ -195,19 +224,16 @@ class GattServerManager(
             characteristic: BluetoothGattCharacteristic?
         ) {
             val uuid = characteristic?.uuid
-            Log.i(TAG, "Characteristic READ: $uuid (offset=$offset)")
+            Log.i(TAG, "READ: $uuid offset=$offset")
 
             val responseBytes = when (uuid) {
                 DEVICE_NAME_CHAR_UUID -> GoPlusBleService.TARGET_DEVICE_NAME.toByteArray(Charsets.UTF_8)
-                else -> DEFAULT_DEVICE_INFO
+                // Return a plausible SFIDA state value on read
+                STATE_CHARACTERISTIC_UUID -> byteArrayOf(0x01, 0x00)
+                GOPLUS_NOTIFY_CHAR_UUID -> byteArrayOf(0x01, 0x00)
+                else -> byteArrayOf(0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
             }
-            bluetoothGattServer?.sendResponse(
-                device,
-                requestId,
-                BluetoothGatt.GATT_SUCCESS,
-                0,
-                responseBytes
-            )
+            bluetoothGattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, responseBytes)
         }
 
         override fun onCharacteristicWriteRequest(
@@ -221,19 +247,20 @@ class GattServerManager(
         ) {
             val uuid = characteristic?.uuid
             val data = value?.toList() ?: emptyList()
-            Log.i(TAG, "Characteristic WRITE: $uuid data=${data.joinToString { "%02X".format(it) }}")
+            Log.i(TAG, "WRITE: $uuid data=${data.joinToString { "%02X".format(it) }}")
+
+            // When Pokémon GO writes to SFIDA State char during pairing → send button press
+            if (uuid == STATE_CHARACTERISTIC_UUID && data.isNotEmpty()) {
+                Log.i(TAG, "SFIDA State write received — sending button press 0x02")
+                // Send button press in a short delay to simulate real hardware
+                mainHandler.postDelayed({ sendButtonPress() }, 100)
+            }
 
             // Route to auto-catcher engine
             autoCatcherEngine?.onWriteRequest(uuid, data, requestId, device)
 
             if (responseNeeded) {
-                bluetoothGattServer?.sendResponse(
-                    device,
-                    requestId,
-                    BluetoothGatt.GATT_SUCCESS,
-                    0,
-                    null
-                )
+                bluetoothGattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
             }
         }
 
@@ -246,15 +273,34 @@ class GattServerManager(
             offset: Int,
             value: ByteArray?
         ) {
-            Log.i(TAG, "Descriptor write: ${descriptor?.uuid}, value=${value?.toList()?.joinToString { "%02X".format(it) }}")
+            val charUuid = descriptor?.characteristic?.uuid
+            val descUuid = descriptor?.uuid
+            val data = value?.toList() ?: emptyList()
+            Log.i(TAG, "DESC WRITE: desc=$descUuid char=$charUuid value=${data.joinToString { "%02X".format(it) }}")
+
+            // Pokémon GO enabling notifications on SFIDA State characteristic
+            if (descUuid == CLIENT_CONFIG_DESCRIPTOR_UUID && charUuid == STATE_CHARACTERISTIC_UUID) {
+                if (data.getOrNull(0) == 0x01 && data.getOrNull(1) == 0x00) {
+                    Log.i(TAG, "SFIDA State notifications ENABLED by ${device?.address}")
+                    sfidaNotifyDevice = device
+                    // Auto-send button press to trigger "Press the button" → paired flow
+                    mainHandler.postDelayed({
+                        Log.i(TAG, "Auto-sending button press 0x02 for pairing handshake")
+                        sendButtonPress()
+                    }, 200)
+                } else if (data.getOrNull(0) == 0x00 && data.getOrNull(1) == 0x00) {
+                    Log.i(TAG, "SFIDA State notifications disabled")
+                    if (device == sfidaNotifyDevice) sfidaNotifyDevice = null
+                }
+            }
+
+            // GO Plus notify characteristic CCCD
+            if (descUuid == CLIENT_CONFIG_DESCRIPTOR_UUID && charUuid == GOPLUS_NOTIFY_CHAR_UUID) {
+                Log.i(TAG, "GO Plus notify CCCD written: ${data.joinToString { "%02X".format(it) }}")
+            }
+
             if (responseNeeded) {
-                bluetoothGattServer?.sendResponse(
-                    device,
-                    requestId,
-                    BluetoothGatt.GATT_SUCCESS,
-                    0,
-                    null
-                )
+                bluetoothGattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
             }
         }
     }
