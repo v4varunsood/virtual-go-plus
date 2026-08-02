@@ -58,7 +58,7 @@ class GoPlusBleService : Service() {
 
     enum class ConnectionState { ADVERTISING, CONNECTED, DISCONNECTED, PAIRING }
 
-    inner class LocalBinder : Binder {
+    inner class LocalBinder : Binder() {
         fun getService(): GoPlusBleService = this@GoPlusBleService
     }
 
