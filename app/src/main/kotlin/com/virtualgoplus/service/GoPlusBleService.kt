@@ -74,24 +74,28 @@ class GoPlusBleService : Service() {
             when (intent?.action) {
                 BluetoothDevice.ACTION_PAIRING_REQUEST -> {
                     val device: BluetoothDevice? = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
-                    Log.i(TAG, "Pairing request from: ${device?.address}")
+                    val pairingTransport = intent.getIntExtra(BluetoothDevice.EXTRA_TRANSPORT, BluetoothDevice.TRANSPORT_LE)
+                    Log.i(TAG, "Pairing request from: ${device?.address}, transport=$pairingTransport")
                     connectionState = ConnectionState.PAIRING
                     updateNotification("Pairing...")
 
-                    // Auto-accept the pairing with PIN 000000
-                    // Use reflection to avoid API compatibility issues
-                    try {
-                        // Abort broadcast and set pairing confirmation
-                        val abortBroadcast = intent.getBooleanExtra("abortBroadcast", false)
-                        if (abortBroadcast) {
-                            Log.i(TAG, "Auto-accepting pairing request")
-                            // Try to set PIN
+                    // Give the BLE stack 200ms to process before auto-accepting
+                    // This is critical — responding too fast gets ignored
+                    serviceScope.launch {
+                        kotlinx.coroutines.delay(200L)
+                        try {
                             device?.setPin("000000".toByteArray())
-                            // Confirm the pairing
                             device?.setPairingConfirmation(true)
+                            Log.i(TAG, "Pairing auto-accepted (PIN=000000, confirm=true)")
+                        } catch (e: SecurityException) {
+                            Log.e(TAG, "Pairing security error: ${e.message}")
+                            // Try downgrade to just confirmation without PIN
+                            try {
+                                device?.setPairingConfirmation(true)
+                            } catch (e2: SecurityException) {
+                                Log.e(TAG, "Confirm also failed: ${e2.message}")
+                            }
                         }
-                    } catch (e: SecurityException) {
-                        Log.e(TAG, "Pairing security error: ${e.message}")
                     }
                 }
                 BluetoothDevice.ACTION_BOND_STATE_CHANGED -> {
@@ -100,13 +104,26 @@ class GoPlusBleService : Service() {
                     Log.i(TAG, "Bond state: $prevState -> $state")
                     when (state) {
                         BluetoothDevice.BOND_BONDED -> {
-                            Log.i(TAG, "Paired successfully!")
+                            Log.i(TAG, "✅ Paired successfully!")
                             notifyConnectionState(ConnectionState.CONNECTED)
                         }
                         BluetoothDevice.BOND_NONE -> {
                             Log.i(TAG, "Pairing removed")
+                            notifyConnectionState(ConnectionState.DISCONNECTED)
+                        }
+                        BluetoothDevice.BOND_BONDING -> {
+                            Log.i(TAG, "Pairing in progress...")
                         }
                     }
+                }
+                BluetoothDevice.ACTION_ACL_CONNECTED -> {
+                    val device: BluetoothDevice? = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
+                    Log.i(TAG, "ACL connected: ${device?.address}")
+                }
+                BluetoothDevice.ACTION_ACL_DISCONNECTED -> {
+                    val device: BluetoothDevice? = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
+                    Log.i(TAG, "ACL disconnected: ${device?.address}")
+                    notifyConnectionState(ConnectionState.DISCONNECTED)
                 }
             }
         }
