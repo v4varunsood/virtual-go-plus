@@ -44,10 +44,6 @@ class GoPlusBleService : Service() {
 
         // The exact device name Niantic's app looks for
         const val TARGET_DEVICE_NAME = "GO Plus"
-
-        private val TARGET_SERVICE_UUIDS: Array<ParcelUuid> = arrayOf(
-            ParcelUuid(GOPLUS_SERVICE_UUID)
-        )
     }
 
     private val binder = LocalBinder()

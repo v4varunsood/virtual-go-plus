@@ -223,11 +223,13 @@ fun VirtualGoPlusUI(
             GoPlusBleService.ConnectionState.ADVERTISING -> "Advertising"
             GoPlusBleService.ConnectionState.CONNECTED -> "Connected"
             GoPlusBleService.ConnectionState.DISCONNECTED -> "Disconnected"
+            GoPlusBleService.ConnectionState.PAIRING -> "Pairing..."
         }
         val stateColor = when (connectionState) {
             GoPlusBleService.ConnectionState.ADVERTISING -> androidx.compose.ui.graphics.Color(0xFFFFA000)
             GoPlusBleService.ConnectionState.CONNECTED -> androidx.compose.ui.graphics.Color(0xFF4CAF50)
             GoPlusBleService.ConnectionState.DISCONNECTED -> androidx.compose.ui.graphics.Color(0xFF9E9E9E)
+            GoPlusBleService.ConnectionState.PAIRING -> androidx.compose.ui.graphics.Color(0xFFFF9800)
         }
 
         Surface(
