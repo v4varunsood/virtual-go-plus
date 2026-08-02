@@ -43,7 +43,7 @@ class GoPlusBleService : Service() {
             java.util.UUID.fromString("0000FEBE-0000-1000-8000-00805F9B34FB")
 
         // The exact device name Niantic's app looks for
-        const val TARGET_DEVICE_NAME = "GO Plus"
+        const val TARGET_DEVICE_NAME = "Pokemon GO Plus"
     }
 
     private val binder = LocalBinder()
@@ -248,9 +248,9 @@ class GoPlusBleService : Service() {
             .build()
 
         // Include the GO Plus service UUID in the advertising data
-        // and the specific device name Niantic looks for
+        // and the device name so iOS Pokémon GO can find "Pokemon GO Plus"
         val data = AdvertiseData.Builder()
-            .setIncludeDeviceName(false) // Don't include generic name, set explicitly below
+            .setIncludeDeviceName(true) // Broadcasts as "Pokemon GO Plus"
             .addServiceUuid(ParcelUuid(GOPLUS_SERVICE_UUID))
             .build()
 

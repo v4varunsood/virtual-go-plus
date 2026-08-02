@@ -32,6 +32,10 @@ class GattServerManager(
         // Client characteristic configuration descriptor UUID
         val CLIENT_CONFIG_DESCRIPTOR_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 
+        // Generic Access Service (0x1800) — required by iOS BLE specs
+        val GENERIC_ACCESS_SERVICE_UUID: UUID = UUID.fromString("00001800-0000-1000-8000-00805f9b34fb")
+        val DEVICE_NAME_CHAR_UUID: UUID = UUID.fromString("00002a00-0000-1000-8000-00805f9b34fb")
+
         // GO Plus protocol characteristic UUIDs (known from reverse engineering)
         val GOPLUS_WRITE_CHAR_UUID: UUID = UUID.fromString("0000FEBE-0000-1000-8000-00805F9B34FB")
         val GOPLUS_NOTIFY_CHAR_UUID: UUID = UUID.fromString("0000FEBD-0000-1000-8000-00805F9B34FB")
@@ -103,10 +107,24 @@ class GattServerManager(
         ))
         sfidaService.addCharacteristic(stateChar)
 
+        // Generic Access Service (0x1800) — required so iOS BLE scanner shows device name
+        val gasService = BluetoothGattService(
+            GENERIC_ACCESS_SERVICE_UUID,
+            0
+        )
+        val deviceNameChar = BluetoothGattCharacteristic(
+            DEVICE_NAME_CHAR_UUID,
+            BluetoothGattCharacteristic.PROPERTY_READ,
+            BluetoothGattCharacteristic.PERMISSION_READ
+        )
+        deviceNameChar.value = GoPlusBleService.TARGET_DEVICE_NAME.toByteArray(Charsets.UTF_8)
+        gasService.addCharacteristic(deviceNameChar)
+
         bluetoothGattServer?.addService(goPlusService)
         bluetoothGattServer?.addService(sfidaService)
+        bluetoothGattServer?.addService(gasService)
 
-        Log.i(TAG, "GATT server initialized with GO Plus + SFIDA services")
+        Log.i(TAG, "GATT server initialized with GO Plus + SFIDA + Generic Access services")
     }
 
     fun shutdown() {
@@ -178,12 +196,17 @@ class GattServerManager(
         ) {
             val uuid = characteristic?.uuid
             Log.i(TAG, "Characteristic READ: $uuid (offset=$offset)")
+
+            val responseBytes = when (uuid) {
+                DEVICE_NAME_CHAR_UUID -> GoPlusBleService.TARGET_DEVICE_NAME.toByteArray(Charsets.UTF_8)
+                else -> DEFAULT_DEVICE_INFO
+            }
             bluetoothGattServer?.sendResponse(
                 device,
                 requestId,
                 BluetoothGatt.GATT_SUCCESS,
                 0,
-                DEFAULT_DEVICE_INFO
+                responseBytes
             )
         }
 
