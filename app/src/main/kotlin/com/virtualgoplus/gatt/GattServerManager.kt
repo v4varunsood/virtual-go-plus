@@ -280,7 +280,9 @@ class GattServerManager(
 
             // Pokémon GO enabling notifications on SFIDA State characteristic
             if (descUuid == CLIENT_CONFIG_DESCRIPTOR_UUID && charUuid == STATE_CHARACTERISTIC_UUID) {
-                if (data.getOrNull(0) == 0x01 && data.getOrNull(1) == 0x00) {
+                val b0 = data.getOrNull(0)?.toInt() ?: -1
+                val b1 = data.getOrNull(1)?.toInt() ?: -1
+                if (b0 == 0x01 && b1 == 0x00) {
                     Log.i(TAG, "SFIDA State notifications ENABLED by ${device?.address}")
                     sfidaNotifyDevice = device
                     // Auto-send button press to trigger "Press the button" → paired flow
@@ -288,7 +290,7 @@ class GattServerManager(
                         Log.i(TAG, "Auto-sending button press 0x02 for pairing handshake")
                         sendButtonPress()
                     }, 200)
-                } else if (data.getOrNull(0) == 0x00 && data.getOrNull(1) == 0x00) {
+                } else if (b0 == 0x00 && b1 == 0x00) {
                     Log.i(TAG, "SFIDA State notifications disabled")
                     if (device == sfidaNotifyDevice) sfidaNotifyDevice = null
                 }
